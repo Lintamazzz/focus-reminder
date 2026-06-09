@@ -20,25 +20,31 @@ jobs:
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
       release_tag: ${{ steps.release.outputs.release_tag }}
+      app_version: ${{ steps.release.outputs.app_version }}
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Create draft release
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          app_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
           release_tag="ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           release_id="$(
             gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
               -f tag_name="$release_tag" \
               -f target_commitish="$GITHUB_SHA" \
-              -f name="Focus Reminder Build $GITHUB_SHA" \
-              -f body="Automated build from commit $GITHUB_SHA." \
+              -f name="Focus Reminder v$app_version (Build in progress)" \
+              -f body="Installation packages are being built." \
               -F draft=true \
               -F prerelease=false \
               --jq '.id'
           )"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
 
@@ -51,16 +57,16 @@ jobs:
         include:
           - name: macOS Apple Silicon
             platform: macos-latest
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles dmg
+            asset_name: focus-reminder-v[version]-macos-arm64[ext]
           - name: macOS Intel
             platform: macos-latest
-            args: --target x86_64-apple-darwin
-          - name: Linux
-            platform: ubuntu-22.04
-            args: ""
+            args: --target x86_64-apple-darwin --bundles dmg
+            asset_name: focus-reminder-v[version]-macos-x64[ext]
           - name: Windows
             platform: windows-2025
-            args: ""
+            args: --bundles nsis
+            asset_name: focus-reminder-v[version]-windows-x64-setup[ext]
 
     runs-on: ${{ matrix.platform }}
 
@@ -79,12 +85,6 @@ jobs:
         with:
           targets: ${{ startsWith(matrix.platform, 'macos-') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
       - name: Install frontend dependencies
         run: npm ci
 
@@ -97,7 +97,7 @@ jobs:
           tagName: ${{ needs.prepare.outputs.release_tag }}
           releaseDraft: true
           prerelease: false
-          releaseAssetNamePattern: "[name]_[version]_[platform]_[arch][ext]"
+          assetNamePattern: ${{ matrix.asset_name }}
           args: ${{ matrix.args }}
 
   publish:
@@ -113,17 +113,46 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
         shell: bash
         run: |
-          gh release delete latest --cleanup-tag --yes 2>/dev/null || true
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-            -f ref=refs/tags/latest \
-            -f sha="$GITHUB_SHA"
+          short_sha="${GITHUB_SHA::7}"
+          cat > release-notes.md <<EOF
+          ## Downloads
+
+          - **macOS - Apple Silicon (M1 or newer):** focus-reminder-v${APP_VERSION}-macos-arm64.dmg
+          - **macOS - Intel:** focus-reminder-v${APP_VERSION}-macos-x64.dmg
+          - **Windows 10/11 (64-bit):** focus-reminder-v${APP_VERSION}-windows-x64-setup.exe
+
+          These builds are currently unsigned, so your operating system may display a security warning.
+
+          The two source code archives are generated automatically by GitHub and are intended for developers.
+
+          Built from commit [${short_sha}](https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}).
+          EOF
+
+          if previous_release_id="$(
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/latest" \
+              --jq '.id' 2>/dev/null
+          )"; then
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/releases/$previous_release_id"
+          fi
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/latest" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/latest" \
+              -f sha="$GITHUB_SHA" \
+              -F force=true
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref=refs/tags/latest \
+              -f sha="$GITHUB_SHA"
+          fi
 
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -f tag_name=latest \
-            -f name="Focus Reminder Latest" \
-            -f body="Automated build from commit $GITHUB_SHA." \
+            -f name="Focus Reminder v${APP_VERSION} (Latest Build)" \
+            -F body=@release-notes.md \
             -F draft=false \
             -F prerelease=false \
             -f make_latest=true

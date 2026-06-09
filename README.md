@@ -53,9 +53,17 @@ npm run dev
 npm run tauri build
 ```
 
-每次向 `main` 分支推送提交时，GitHub Actions 都会自动构建 macOS（Apple Silicon 和 Intel）、Windows、Linux 安装包。
+每次向 `main` 分支推送提交时，GitHub Actions 都会自动构建以下安装包：
 
-构建完成后，安装包会发布到固定的 `latest` Release。下一次推送会删除并重建这个 Release，因此页面中始终只保留最近一次成功构建的安装包。
+| 系统 | 下载文件 | 说明 |
+| --- | --- | --- |
+| macOS Apple Silicon | `focus-reminder-vX.Y.Z-macos-arm64.dmg` | M1、M2、M3、M4 等芯片 |
+| macOS Intel | `focus-reminder-vX.Y.Z-macos-x64.dmg` | Intel 芯片 |
+| Windows | `focus-reminder-vX.Y.Z-windows-x64-setup.exe` | Windows 10/11 64 位 |
+
+构建完成后，安装包会发布到固定的 `latest` Release，标题包含当前应用版本和 `Latest Build` 标记。下一次推送会删除并重建这个 Release，因此页面中始终只保留最近一次成功构建的安装包。
+
+GitHub 还会自动附加 `Source code (zip)` 和 `Source code (tar.gz)`，这两个文件面向开发者，不是应用安装包。目前安装包尚未进行代码签名，操作系统可能显示安全警告。
 
 日常发布只需要提交并推送：
 
@@ -67,7 +75,7 @@ git push origin main
 
 修改应用版本时，仍需同步更新 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 中的版本号。
 
-可以在仓库的 Actions 页面查看构建进度，完成后安装包会出现在 Releases 页面的 `Focus Reminder Latest` 中。
+可以在仓库的 Actions 页面查看构建进度，完成后安装包会出现在 Releases 页面的 `Focus Reminder vX.Y.Z (Latest Build)` 中。
 
 ## 验证
 
