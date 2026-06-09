@@ -4,9 +4,13 @@ const PLANNED_TIME_OPTIONS = [1, 5, 15, 30, 45, 60];
 
 type TaskStartFormProps = {
   onStart: (title: string, plannedMinutes: number) => void;
+  pending?: boolean;
 };
 
-export default function TaskStartForm({ onStart }: TaskStartFormProps) {
+export default function TaskStartForm({
+  onStart,
+  pending = false,
+}: TaskStartFormProps) {
   const [title, setTitle] = useState("");
   const [plannedMinutes, setPlannedMinutes] = useState(30);
 
@@ -62,8 +66,8 @@ export default function TaskStartForm({ onStart }: TaskStartFormProps) {
             </div>
           </label>
 
-          <button className="primary-button" type="submit">
-            开始任务
+          <button className="primary-button" disabled={pending} type="submit">
+            {pending ? "正在开始…" : "开始任务"}
             <span aria-hidden="true">→</span>
           </button>
         </form>
