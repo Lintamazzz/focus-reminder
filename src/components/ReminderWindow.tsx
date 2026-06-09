@@ -1,17 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
-import type {
-  ReminderAction,
-  ReminderPayload,
-} from "../types/task";
+import type { ReminderAction, ReminderPayload } from "../types/task";
 import { formatDuration } from "../utils/time";
 
-const EXTENSION_OPTIONS: Array<{ action: ReminderAction; label: string }> = [
-  { action: "extend_5", label: "继续 5 分钟" },
-  { action: "extend_15", label: "继续 15 分钟" },
-  { action: "extend_30", label: "继续 30 分钟" },
-];
+const DEFAULT_EXTENSION_OPTIONS = [5, 15, 30];
 
 export default function ReminderWindow() {
   const [payload, setPayload] = useState<ReminderPayload | null>(null);
@@ -23,6 +16,7 @@ export default function ReminderWindow() {
 
     listen<ReminderPayload>("reminder-data", ({ payload: nextPayload }) => {
       if (mounted) {
+        document.documentElement.dataset.theme = nextPayload.theme;
         setPayload(nextPayload);
         setPending(false);
       }
@@ -71,16 +65,20 @@ export default function ReminderWindow() {
       </dl>
 
       <div className="extension-grid">
-        {EXTENSION_OPTIONS.map((option) => (
-          <button
-            disabled={pending}
-            key={option.action}
-            onClick={() => submitAction(option.action)}
-            type="button"
-          >
-            {option.label}
-          </button>
-        ))}
+        {(payload?.reminderOptions ?? DEFAULT_EXTENSION_OPTIONS).map(
+          (minutes) => (
+            <button
+              disabled={pending}
+              key={minutes}
+              onClick={() =>
+                submitAction(`extend_${minutes}` as ReminderAction)
+              }
+              type="button"
+            >
+              继续 {minutes} 分钟
+            </button>
+          ),
+        )}
       </div>
 
       <button

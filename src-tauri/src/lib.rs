@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -6,7 +7,7 @@ use std::{
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -46,6 +47,8 @@ struct ReminderPayload {
     task_title: String,
     planned_minutes: u32,
     elapsed_seconds: u64,
+    reminder_options: Vec<u32>,
+    theme: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -53,6 +56,26 @@ struct ReminderPayload {
 struct ReminderActionPayload {
     action: String,
     next_reminder_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSettings {
+    default_planned_minutes: u32,
+    reminder_options: Vec<u32>,
+    always_on_top: bool,
+    theme: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            default_planned_minutes: 30,
+            reminder_options: vec![5, 15, 30],
+            always_on_top: true,
+            theme: "system".to_string(),
+        }
+    }
 }
 
 fn database_connection(path: &Path) -> Result<Connection, String> {
@@ -257,6 +280,259 @@ fn get_running_session(state: State<'_, AppState>) -> Result<Option<TaskSession>
     find_running_session(&connection)
 }
 
+fn find_completed_sessions(
+    connection: &Connection,
+    start_at: DateTime<Utc>,
+    end_at: DateTime<Utc>,
+) -> Result<Vec<TaskSession>, String> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT id, title, planned_minutes, started_at, next_reminder_at,
+                   ended_at, status, note, record_skipped, created_at, updated_at
+            FROM task_sessions
+            WHERE status = 'completed'
+              AND ended_at >= ?1
+              AND ended_at < ?2
+            ORDER BY ended_at DESC
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let sessions = statement
+        .query_map(
+            params![to_iso(start_at), to_iso(end_at)],
+            task_session_from_row,
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(sessions)
+}
+
+#[tauri::command]
+fn get_today_logs(
+    state: State<'_, AppState>,
+    start_at: i64,
+    end_at: i64,
+) -> Result<Vec<TaskSession>, String> {
+    let start_at = DateTime::from_timestamp_millis(start_at)
+        .ok_or_else(|| "无效的日期开始时间".to_string())?;
+    let end_at =
+        DateTime::from_timestamp_millis(end_at).ok_or_else(|| "无效的日期结束时间".to_string())?;
+    if end_at <= start_at {
+        return Err("日期结束时间必须晚于开始时间".to_string());
+    }
+
+    let connection = database_connection(&state.database_path)?;
+    find_completed_sessions(&connection, start_at, end_at)
+}
+
+fn delete_completed_task_record(
+    connection: &mut Connection,
+    session_id: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let exists: bool = transaction
+        .query_row(
+            "
+            SELECT EXISTS(
+                SELECT 1
+                FROM task_sessions
+                WHERE id = ?1 AND status = 'completed'
+            )
+            ",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    if !exists {
+        return Err("完成记录不存在或不能删除".to_string());
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM reminder_events WHERE session_id = ?1",
+            [session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM task_sessions WHERE id = ?1 AND status = 'completed'",
+            [session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_completed_task(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let mut connection = database_connection(&state.database_path)?;
+    delete_completed_task_record(&mut connection, &session_id)
+}
+
+fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+    if settings.default_planned_minutes == 0 || settings.default_planned_minutes > 1_440 {
+        return Err("默认预计时间必须在 1 到 1440 分钟之间".to_string());
+    }
+    if settings.reminder_options.len() != 3 {
+        return Err("请设置 3 个提醒延长选项".to_string());
+    }
+    if settings
+        .reminder_options
+        .iter()
+        .any(|minutes| *minutes == 0 || *minutes > 1_440)
+    {
+        return Err("提醒延长时间必须在 1 到 1440 分钟之间".to_string());
+    }
+    let mut unique_options = settings.reminder_options.clone();
+    unique_options.sort_unstable();
+    unique_options.dedup();
+    if unique_options.len() != settings.reminder_options.len() {
+        return Err("提醒延长选项不能重复".to_string());
+    }
+    if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
+        return Err("不支持的主题设置".to_string());
+    }
+    Ok(())
+}
+
+fn load_settings(connection: &Connection) -> Result<AppSettings, String> {
+    let mut statement = connection
+        .prepare("SELECT key, value FROM app_settings")
+        .map_err(|error| error.to_string())?;
+    let values = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let defaults = AppSettings::default();
+    let settings = AppSettings {
+        default_planned_minutes: values
+            .get("default_planned_minutes")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(defaults.default_planned_minutes),
+        reminder_options: values
+            .get("reminder_options")
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|item| item.parse().ok())
+                    .collect()
+            })
+            .filter(|options: &Vec<u32>| !options.is_empty())
+            .unwrap_or(defaults.reminder_options),
+        always_on_top: values
+            .get("always_on_top")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(defaults.always_on_top),
+        theme: values.get("theme").cloned().unwrap_or(defaults.theme),
+    };
+
+    validate_settings(&settings)?;
+    Ok(settings)
+}
+
+fn persist_settings(
+    connection: &mut Connection,
+    settings: &AppSettings,
+) -> Result<AppSettings, String> {
+    validate_settings(settings)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let values = [
+        (
+            "default_planned_minutes",
+            settings.default_planned_minutes.to_string(),
+        ),
+        (
+            "reminder_options",
+            settings
+                .reminder_options
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        ("always_on_top", settings.always_on_top.to_string()),
+        ("theme", settings.theme.clone()),
+    ];
+
+    for (key, value) in values {
+        transaction
+            .execute(
+                "
+                INSERT INTO app_settings (key, value)
+                VALUES (?1, ?2)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                ",
+                params![key, value],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+fn get_app_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    let connection = database_connection(&state.database_path)?;
+    load_settings(&connection)
+}
+
+#[tauri::command]
+fn save_app_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<AppSettings, String> {
+    let mut connection = database_connection(&state.database_path)?;
+    let saved = persist_settings(&mut connection, &settings)?;
+    if let Some(window) = app.get_webview_window("reminder") {
+        window
+            .set_always_on_top(saved.always_on_top)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(saved)
+}
+
+fn write_markdown_export(directory: &Path, date: &str, content: &str) -> Result<PathBuf, String> {
+    if date.len() != 10
+        || !date
+            .chars()
+            .enumerate()
+            .all(|(index, character)| match index {
+                4 | 7 => character == '-',
+                _ => character.is_ascii_digit(),
+            })
+    {
+        return Err("无效的导出日期".to_string());
+    }
+    if content.len() > 1_000_000 {
+        return Err("导出内容过大".to_string());
+    }
+
+    let export_path = directory.join(format!("done-log-{date}.md"));
+    fs::write(&export_path, content).map_err(|error| error.to_string())?;
+    Ok(export_path)
+}
+
+#[tauri::command]
+fn save_markdown_export(app: AppHandle, date: String, content: String) -> Result<String, String> {
+    let download_directory = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
+    write_markdown_export(&download_directory, &date, &content)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 fn complete_task_record(
     connection: &Connection,
     session_id: &str,
@@ -351,12 +627,15 @@ fn record_reminder_action(
     action: &str,
     created_at: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, String> {
-    let extension_minutes = match action {
-        "extend_5" => Some(5),
-        "extend_15" => Some(15),
-        "extend_30" => Some(30),
-        "finish" => None,
-        _ => return Err("不支持的提醒操作".to_string()),
+    let extension_minutes = if action == "finish" {
+        None
+    } else {
+        let minutes = action
+            .strip_prefix("extend_")
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| (1..=1_440).contains(value))
+            .ok_or_else(|| "不支持的提醒操作".to_string())?;
+        Some(minutes)
     };
     let transaction = connection
         .transaction()
@@ -421,6 +700,8 @@ fn show_reminder(
     let window = app
         .get_webview_window("reminder")
         .ok_or_else(|| "找不到提醒窗口".to_string())?;
+    let connection = database_connection(&state.database_path)?;
+    let settings = load_settings(&connection)?;
 
     {
         let mut context = state
@@ -443,11 +724,13 @@ fn show_reminder(
                 task_title,
                 planned_minutes,
                 elapsed_seconds,
+                reminder_options: settings.reminder_options,
+                theme: settings.theme,
             },
         )
         .map_err(|error| error.to_string())?;
     window
-        .set_always_on_top(true)
+        .set_always_on_top(settings.always_on_top)
         .map_err(|error| error.to_string())?;
     window.show().map_err(|error| error.to_string())?;
     window.unminimize().map_err(|error| error.to_string())?;
@@ -535,6 +818,11 @@ pub fn run() {
             get_running_session,
             complete_task,
             discard_task,
+            get_today_logs,
+            delete_completed_task,
+            get_app_settings,
+            save_app_settings,
+            save_markdown_export,
             show_reminder,
             hide_reminder,
             submit_reminder_action
@@ -644,5 +932,178 @@ mod tests {
 
         drop(connection);
         let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn queries_completed_sessions_within_local_day_bounds() {
+        let database_path = temporary_database_path();
+        initialize_database(&database_path).expect("database should initialize");
+        let connection = database_connection(&database_path).expect("database should open");
+        let day_start = DateTime::parse_from_rfc3339("2026-06-08T16:00:00Z")
+            .expect("date should parse")
+            .with_timezone(&Utc);
+        let first = insert_task(
+            &connection,
+            "整理今日记录".to_string(),
+            30,
+            day_start + Duration::hours(1),
+        )
+        .expect("first task should start");
+        complete_task_record(
+            &connection,
+            &first.id,
+            "完成今日记录",
+            false,
+            day_start + Duration::hours(1) + Duration::minutes(25),
+            day_start + Duration::hours(1) + Duration::minutes(25),
+        )
+        .expect("first task should complete");
+
+        let second = insert_task(
+            &connection,
+            "跨日任务".to_string(),
+            15,
+            day_start + Duration::hours(25),
+        )
+        .expect("second task should start");
+        complete_task_record(
+            &connection,
+            &second.id,
+            "不应出现在当天",
+            false,
+            day_start + Duration::hours(25) + Duration::minutes(10),
+            day_start + Duration::hours(25) + Duration::minutes(10),
+        )
+        .expect("second task should complete");
+
+        let sessions =
+            find_completed_sessions(&connection, day_start, day_start + Duration::days(1))
+                .expect("completed sessions should load");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, first.id);
+
+        drop(connection);
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn deletes_completed_session_and_its_reminder_events() {
+        let database_path = temporary_database_path();
+        initialize_database(&database_path).expect("database should initialize");
+        let mut connection = database_connection(&database_path).expect("database should open");
+        let started_at = Utc::now();
+        let session = insert_task(&connection, "删除完成记录".to_string(), 30, started_at)
+            .expect("task should start");
+        let reminder_context = ReminderContext {
+            session_id: session.id.clone(),
+            triggered_at: started_at + Duration::minutes(30),
+            elapsed_seconds: 30 * 60,
+            planned_minutes: 30,
+        };
+        record_reminder_action(
+            &mut connection,
+            &reminder_context,
+            "finish",
+            reminder_context.triggered_at,
+        )
+        .expect("reminder event should save");
+        complete_task_record(
+            &connection,
+            &session.id,
+            "准备删除",
+            false,
+            started_at + Duration::minutes(30),
+            started_at + Duration::minutes(30),
+        )
+        .expect("task should complete");
+
+        delete_completed_task_record(&mut connection, &session.id)
+            .expect("completed record should delete");
+
+        let session_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM task_sessions WHERE id = ?1",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .expect("session count should load");
+        let event_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM reminder_events WHERE session_id = ?1",
+                [&session.id],
+                |row| row.get(0),
+            )
+            .expect("event count should load");
+        assert_eq!(session_count, 0);
+        assert_eq!(event_count, 0);
+
+        let running_session = insert_task(
+            &connection,
+            "不能删除进行中任务".to_string(),
+            15,
+            Utc::now(),
+        )
+        .expect("running task should start");
+        assert!(delete_completed_task_record(&mut connection, &running_session.id).is_err());
+        assert_eq!(
+            get_session(&connection, &running_session.id)
+                .expect("running task should remain")
+                .status,
+            "running"
+        );
+
+        drop(connection);
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn persists_and_reloads_app_settings() {
+        let database_path = temporary_database_path();
+        initialize_database(&database_path).expect("database should initialize");
+        let mut connection = database_connection(&database_path).expect("database should open");
+        assert_eq!(
+            load_settings(&connection).expect("defaults should load"),
+            AppSettings::default()
+        );
+
+        let settings = AppSettings {
+            default_planned_minutes: 45,
+            reminder_options: vec![10, 20, 40],
+            always_on_top: false,
+            theme: "dark".to_string(),
+        };
+        persist_settings(&mut connection, &settings).expect("settings should save");
+        drop(connection);
+
+        let connection = database_connection(&database_path).expect("database should reopen");
+        assert_eq!(
+            load_settings(&connection).expect("saved settings should load"),
+            settings
+        );
+
+        drop(connection);
+        let _ = fs::remove_file(database_path);
+    }
+
+    #[test]
+    fn writes_markdown_export_with_expected_filename() {
+        let export_directory =
+            std::env::temp_dir().join(format!("focus-reminder-export-{}", Uuid::new_v4()));
+        fs::create_dir_all(&export_directory).expect("export directory should exist");
+        let content = "# Done Log - 2026-06-09\n";
+
+        let export_path = write_markdown_export(&export_directory, "2026-06-09", content)
+            .expect("Markdown should export");
+
+        assert_eq!(
+            export_path.file_name().and_then(|name| name.to_str()),
+            Some("done-log-2026-06-09.md")
+        );
+        assert_eq!(
+            fs::read_to_string(&export_path).expect("export should be readable"),
+            content
+        );
+
+        let _ = fs::remove_dir_all(export_directory);
     }
 }

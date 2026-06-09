@@ -12,13 +12,15 @@ export type TaskSession = {
   updatedAt: number;
 };
 
-export type ReminderAction = "extend_5" | "extend_15" | "extend_30" | "finish";
+export type ReminderAction = `extend_${number}` | "finish";
 
 export type ReminderPayload = {
   sessionId: string;
   taskTitle: string;
   plannedMinutes: number;
   elapsedSeconds: number;
+  reminderOptions: number[];
+  theme: ThemePreference;
 };
 
 export type ReminderActionPayload = {
@@ -30,4 +32,20 @@ export type CompletionDraft = {
   session: TaskSession;
   endedAt: number;
   elapsedSeconds: number;
+};
+
+export type ThemePreference = "system" | "light" | "dark";
+
+export type AppSettings = {
+  defaultPlannedMinutes: number;
+  reminderOptions: number[];
+  alwaysOnTop: boolean;
+  theme: ThemePreference;
+};
+
+export type DailySummary = {
+  completedCount: number;
+  totalFocusSeconds: number;
+  overtimeCount: number;
+  averageOvertimeSeconds: number;
 };

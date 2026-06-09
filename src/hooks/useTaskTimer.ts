@@ -25,6 +25,7 @@ export function useTaskTimer() {
   const [initializing, setInitializing] = useState(true);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [completionVersion, setCompletionVersion] = useState(0);
   const reminderOpenRef = useRef(false);
   const sessionRef = useRef<TaskSession | null>(null);
 
@@ -203,6 +204,7 @@ export function useTaskTimer() {
           );
         }
         setCompletionDraft(null);
+        setCompletionVersion((version) => version + 1);
       } catch (cause) {
         setError(String(cause));
       } finally {
@@ -256,6 +258,7 @@ export function useTaskTimer() {
     initializing,
     pending,
     error,
+    completionVersion,
     startTask,
     requestFinish,
     saveCompletion,

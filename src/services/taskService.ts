@@ -1,5 +1,12 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { TaskSession } from "../types/task";
+import type { AppSettings, TaskSession } from "../types/task";
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  defaultPlannedMinutes: 30,
+  reminderOptions: [5, 15, 30],
+  alwaysOnTop: true,
+  theme: "system",
+};
 
 function createBrowserSession(
   title: string,
@@ -64,4 +71,65 @@ export async function discardTaskSession(sessionId: string): Promise<void> {
   }
 
   await invoke("discard_task", { sessionId });
+}
+
+export async function getTodayLogs(
+  startAt: number,
+  endAt: number,
+): Promise<TaskSession[]> {
+  if (!isTauri()) {
+    return [];
+  }
+
+  return invoke<TaskSession[]>("get_today_logs", { startAt, endAt });
+}
+
+export async function deleteCompletedTask(sessionId: string): Promise<void> {
+  if (!isTauri()) {
+    return;
+  }
+
+  await invoke("delete_completed_task", { sessionId });
+}
+
+export async function getAppSettings(): Promise<AppSettings> {
+  if (!isTauri()) {
+    const stored = window.localStorage.getItem("focus-reminder-settings");
+    return stored ? (JSON.parse(stored) as AppSettings) : DEFAULT_SETTINGS;
+  }
+
+  return invoke<AppSettings>("get_app_settings");
+}
+
+export async function saveAppSettings(
+  settings: AppSettings,
+): Promise<AppSettings> {
+  if (!isTauri()) {
+    window.localStorage.setItem(
+      "focus-reminder-settings",
+      JSON.stringify(settings),
+    );
+    return settings;
+  }
+
+  return invoke<AppSettings>("save_app_settings", { settings });
+}
+
+export async function exportMarkdown(
+  date: string,
+  content: string,
+): Promise<string> {
+  if (!isTauri()) {
+    const url = URL.createObjectURL(
+      new Blob([content], { type: "text/markdown;charset=utf-8" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `done-log-${date}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    return anchor.download;
+  }
+
+  return invoke<string>("save_markdown_export", { date, content });
 }
