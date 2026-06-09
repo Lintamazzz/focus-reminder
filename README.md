@@ -45,6 +45,30 @@ npm run dev
 
 注意：普通浏览器没有 Tauri 后端，无法真正显示独立的置顶提醒窗口。
 
+## 打包与发布
+
+本地打包当前系统对应的安装包：
+
+```bash
+npm run tauri build
+```
+
+每次向 `main` 分支推送提交时，GitHub Actions 都会自动构建 macOS（Apple Silicon 和 Intel）、Windows、Linux 安装包。
+
+构建完成后，安装包会发布到固定的 `latest` Release。下一次推送会删除并重建这个 Release，因此页面中始终只保留最近一次成功构建的安装包。
+
+日常发布只需要提交并推送：
+
+```bash
+git add .
+git commit -m "描述本次修改"
+git push origin main
+```
+
+修改应用版本时，仍需同步更新 `package.json`、`src-tauri/tauri.conf.json` 和 `src-tauri/Cargo.toml` 中的版本号。
+
+可以在仓库的 Actions 页面查看构建进度，完成后安装包会出现在 Releases 页面的 `Focus Reminder Latest` 中。
+
 ## 验证
 
 ```bash
